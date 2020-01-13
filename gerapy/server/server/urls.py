@@ -23,4 +23,6 @@ urlpatterns = [
 ]
 
 if 'runserver' in sys.argv:
-    import gerapy.server.core.scheduler.scheduler
+    # start scheduler
+    from gerapy.server.core.scheduler import sm
+    sm.start()

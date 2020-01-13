@@ -1,7 +1,8 @@
-import sys
-import traceback
-import json, os, requests, time, pytz, pymongo, string
-from shutil import move, copy, rmtree
+from pathlib import Path
+from urllib.parse import unquote
+import base64
+import json, os, requests, time, pytz, pymongo
+from shutil import rmtree
 from requests.exceptions import ConnectionError
 from os.path import join, exists
 from django.shortcuts import render
@@ -9,15 +10,26 @@ from django.core.serializers import serialize
 from django.http import HttpResponse
 from django.forms.models import model_to_dict
 from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from subprocess import Popen, PIPE
+from gerapy import get_logger
 from gerapy.server.core.response import JsonResponse
 from gerapy.cmd.init import PROJECTS_FOLDER
 from gerapy.server.server.settings import TIME_ZONE
 from gerapy.server.core.models import Client, Project, Deploy, Monitor, Task
 from gerapy.server.core.build import build_project, find_egg
-from gerapy.server.core.utils import IGNORES, is_valid_name, copy_tree, TEMPLATES_DIR, TEMPLATES_TO_RENDER, \
-    render_template, get_traceback, scrapyd_url, log_url, get_tree, get_scrapyd
+from gerapy.server.core.utils import IGNORES, scrapyd_url, log_url, get_tree, get_scrapyd, process_html, bytes2str, \
+    clients_of_task, get_job_id
+from django_apscheduler.models import DjangoJob, DjangoJobExecution
+from django.core.files.storage import FileSystemStorage
+import zipfile
+
+logger = get_logger(__name__)
 
 
+@api_view(['GET'])
+# @permission_classes([IsAuthenticated])
 def index(request):
     """
     render index page
@@ -27,6 +39,8 @@ def index(request):
     return render(request, 'index.html')
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def index_status(request):
     """
     index statistics
@@ -56,6 +70,8 @@ def index_status(request):
         return JsonResponse(data)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def client_index(request):
     """
     get client list
@@ -65,6 +81,8 @@ def client_index(request):
     return HttpResponse(serialize('json', Client.objects.order_by('-id')))
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def client_info(request, client_id):
     """
     get client info
@@ -76,6 +94,8 @@ def client_info(request, client_id):
         return JsonResponse(model_to_dict(Client.objects.get(id=client_id)))
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def client_status(request, client_id):
     """
     get client status
@@ -86,13 +106,12 @@ def client_status(request, client_id):
     if request.method == 'GET':
         # get client object
         client = Client.objects.get(id=client_id)
-        try:
-            requests.get(scrapyd_url(client.ip, client.port), timeout=3)
-            return JsonResponse({'result': '1'})
-        except ConnectionError:
-            return JsonResponse({'message': 'Connect Error'}, status=500)
+        requests.get(scrapyd_url(client.ip, client.port), timeout=3)
+        return JsonResponse({'result': '1'})
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def client_update(request, client_id):
     """
     update client info
@@ -107,6 +126,8 @@ def client_update(request, client_id):
         return JsonResponse(model_to_dict(Client.objects.get(id=client_id)))
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def client_create(request):
     """
     create a client
@@ -119,6 +140,8 @@ def client_create(request):
         return JsonResponse(model_to_dict(client))
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def client_remove(request, client_id):
     """
     remove a client
@@ -130,13 +153,13 @@ def client_remove(request, client_id):
         client = Client.objects.get(id=client_id)
         # delete deploy
         Deploy.objects.filter(client=client).delete()
-        # delete task
-        Task.objects.filter(client_id=client_id).delete()
         # delete client
         Client.objects.filter(id=client_id).delete()
         return JsonResponse({'result': '1'})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def spider_list(request, client_id, project_name):
     """
     get spider list from one client
@@ -148,14 +171,13 @@ def spider_list(request, client_id, project_name):
     if request.method == 'GET':
         client = Client.objects.get(id=client_id)
         scrapyd = get_scrapyd(client)
-        try:
-            spiders = scrapyd.list_spiders(project_name)
-            spiders = [{'name': spider, 'id': index + 1} for index, spider in enumerate(spiders)]
-            return JsonResponse(spiders)
-        except ConnectionError:
-            return JsonResponse({'message': 'Connect Error'}, status=500)
+        spiders = scrapyd.list_spiders(project_name)
+        spiders = [{'name': spider, 'id': index + 1} for index, spider in enumerate(spiders)]
+        return JsonResponse(spiders)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def spider_start(request, client_id, project_name, spider_name):
     """
     start a spider
@@ -168,13 +190,12 @@ def spider_start(request, client_id, project_name, spider_name):
     if request.method == 'GET':
         client = Client.objects.get(id=client_id)
         scrapyd = get_scrapyd(client)
-        try:
-            job = scrapyd.schedule(project_name, spider_name)
-            return JsonResponse({'job': job})
-        except ConnectionError:
-            return JsonResponse({'message': 'Connect Error'}, status=500)
+        job = scrapyd.schedule(project_name, spider_name)
+        return JsonResponse({'job': job})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def project_list(request, client_id):
     """
     project deployed list on one client
@@ -185,13 +206,12 @@ def project_list(request, client_id):
     if request.method == 'GET':
         client = Client.objects.get(id=client_id)
         scrapyd = get_scrapyd(client)
-        try:
-            projects = scrapyd.list_projects()
-            return JsonResponse(projects)
-        except ConnectionError:
-            return JsonResponse({'message': 'Connect Error'}, status=500)
+        projects = scrapyd.list_projects()
+        return JsonResponse(projects)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def project_index(request):
     """
     project index list
@@ -208,9 +228,11 @@ def project_index(request):
         return JsonResponse(project_list)
 
 
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
 def project_configure(request, project_name):
     """
-    get or update configuration
+    get configuration
     :param request: request object
     :param project_name: project name
     :return: json
@@ -221,17 +243,27 @@ def project_configure(request, project_name):
         project = model_to_dict(project)
         project['configuration'] = json.loads(project['configuration']) if project['configuration'] else None
         return JsonResponse(project)
+    
     # update configuration
     elif request.method == 'POST':
         project = Project.objects.filter(name=project_name)
         data = json.loads(request.body)
-        configuration = json.dumps(data.get('configuration'))
+        configuration = json.dumps(data.get('configuration'), ensure_ascii=False)
         project.update(**{'configuration': configuration})
-        project = Project.objects.get(name=project_name)
-        project = model_to_dict(project)
-        return JsonResponse(project)
+        
+        # execute generate cmd
+        cmd = ' '.join(['gerapy', 'generate', project_name])
+        p = Popen(cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+        stdout, stderr = bytes2str(p.stdout.read()), bytes2str(p.stderr.read())
+        
+        if not stderr:
+            return JsonResponse({'status': '1'})
+        else:
+            return JsonResponse({'status': '0', 'message': stderr})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def project_tree(request, project_name):
     """
     get file tree of project
@@ -246,6 +278,8 @@ def project_tree(request, project_name):
         return JsonResponse(tree)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def project_create(request):
     """
     create a configurable project
@@ -262,6 +296,52 @@ def project_create(request):
         return JsonResponse(model_to_dict(project))
 
 
+@api_view(['POST'])
+# @permission_classes([IsAuthenticated])
+def project_upload(request):
+    """
+    upload project
+    :param request: request object
+    :return: json
+    """
+    if request.method == 'POST':
+        file = request.FILES['file']
+        file_name = file.name
+        fs = FileSystemStorage(PROJECTS_FOLDER)
+        zip_file_name = fs.save(file_name, file)
+        logger.debug('zip file name %s', zip_file_name)
+        # extract zip file
+        with zipfile.ZipFile(join(PROJECTS_FOLDER, zip_file_name), 'r') as zip_ref:
+            zip_ref.extractall(PROJECTS_FOLDER)
+        logger.debug('extracted files to %s', PROJECTS_FOLDER)
+        return JsonResponse({'status': True})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def project_clone(request):
+    """
+    clone project from github
+    :param request: request object
+    :return: json
+    """
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        address = data.get('address')
+        if not address.startswith('http'):
+            return JsonResponse({'status': False})
+        address = address + '.git' if not address.endswith('.git') else address
+        cmd = 'git clone {address} {target}'.format(address=address, target=join(PROJECTS_FOLDER, Path(address).stem))
+        logger.debug('clone cmd %s', cmd)
+        p = Popen(cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+        stdout, stderr = bytes2str(p.stdout.read()), bytes2str(p.stderr.read())
+        logger.debug('clone run result %s', stdout)
+        if stderr: logger.error(stderr)
+        return JsonResponse({'status': True}) if not stderr else JsonResponse({'status': False})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def project_remove(request, project_name):
     """
     remove project from disk and db
@@ -275,8 +355,6 @@ def project_remove(request, project_name):
         Deploy.objects.filter(project=project).delete()
         # delete project
         result = Project.objects.filter(name=project_name).delete()
-        # delete scheduler
-        Task.objects.filter(project_name=project).delete()
         # get project path
         path = join(os.path.abspath(os.getcwd()), PROJECTS_FOLDER)
         project_path = join(path, project_name)
@@ -286,6 +364,8 @@ def project_remove(request, project_name):
         return JsonResponse({'result': result})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def project_version(request, client_id, project_name):
     """
     get project deploy version
@@ -318,6 +398,8 @@ def project_version(request, client_id, project_name):
         return JsonResponse(model_to_dict(deploy))
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def project_deploy(request, client_id, project_name):
     """
     deploy project operation
@@ -349,6 +431,8 @@ def project_deploy(request, client_id, project_name):
         return JsonResponse(model_to_dict(deploy))
 
 
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
 def project_build(request, project_name):
     """
     get build info or execute build operation
@@ -359,6 +443,7 @@ def project_build(request, project_name):
     # get project folder
     path = os.path.abspath(join(os.getcwd(), PROJECTS_FOLDER))
     project_path = join(path, project_name)
+    
     # get build version
     if request.method == 'GET':
         egg = find_egg(project_path)
@@ -382,6 +467,7 @@ def project_build(request, project_name):
         # transfer model to dict then dumps it to json
         data = model_to_dict(model)
         return JsonResponse(data)
+    
     # build operation manually by clicking button
     elif request.method == 'POST':
         data = json.loads(request.body)
@@ -408,55 +494,56 @@ def project_build(request, project_name):
         return JsonResponse(data)
 
 
-def project_generate(request, project_name):
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def project_parse(request, project_name):
     """
-    generate code of project
+    parse project
     :param request: request object
     :param project_name: project name
-    :return: json of generated project
+    :return: requests, items, response
     """
     if request.method == 'POST':
-        # get configuration
-        configuration = Project.objects.get(name=project_name).configuration
-        if not configuration:
-            return JsonResponse({'message': 'Invalid configuration'}, status=500)
-        configuration = json.loads(configuration)
-        if not is_valid_name(project_name):
-            return JsonResponse({'message': 'Invalid project name'}, status=500)
-        # remove original project dir
-        project_dir = join(PROJECTS_FOLDER, project_name)
-        if exists(project_dir):
-            rmtree(project_dir)
-        # generate project
-        copy_tree(join(TEMPLATES_DIR, 'project'), project_dir)
-        move(join(PROJECTS_FOLDER, project_name, 'module'), join(project_dir, project_name))
-        for paths in TEMPLATES_TO_RENDER:
-            path = join(*paths)
-            tplfile = join(project_dir,
-                           string.Template(path).substitute(project_name=project_name))
-            vars = {
-                'project_name': project_name,
-                'items': configuration.get('items'),
-            }
-            render_template(tplfile, tplfile.rstrip('.tmpl'), **vars)
-        # generate spider
-        spiders = configuration.get('spiders')
-        for spider in spiders:
-            source_tpl_file = join(TEMPLATES_DIR, 'spiders', 'crawl.tmpl')
-            new_tpl_file = join(PROJECTS_FOLDER, project_name, project_name, 'spiders', 'crawl.tmpl')
-            spider_file = "%s.py" % join(PROJECTS_FOLDER, project_name, project_name, 'spiders', spider.get('name'))
-            copy(source_tpl_file, new_tpl_file)
-            render_template(new_tpl_file, spider_file, spider=spider, project_name=project_name)
-        # save generated_at attr
-        model = Project.objects.get(name=project_name)
-        model.generated_at = timezone.now()
-        # clear built_at attr
-        model.built_at = None
-        model.save()
-        # return model
-        return JsonResponse(model_to_dict(model))
+        project_path = join(PROJECTS_FOLDER, project_name)
+        data = json.loads(request.body)
+        logger.debug('post data %s', data)
+        spider_name = data.get('spider')
+        args = {
+            'start': data.get('start', False),
+            'method': data.get('method', 'GET'),
+            'url': data.get('url'),
+            'callback': data.get('callback'),
+            'cookies': "'" + json.dumps(data.get('cookies', {}), ensure_ascii=False) + "'",
+            'headers': "'" + json.dumps(data.get('headers', {}), ensure_ascii=False) + "'",
+            'meta': "'" + json.dumps(data.get('meta', {}), ensure_ascii=False) + "'",
+            'dont_filter': data.get('dont_filter', False),
+            'priority': data.get('priority', 0),
+        }
+        # set request body
+        body = data.get('body', '')
+        if args.get('method').lower() != 'get':
+            args['body'] = "'" + json.dumps(body, ensure_ascii=False) + "'"
+        
+        args_cmd = ' '.join(
+            ['--{arg} {value}'.format(arg=arg, value=value) for arg, value in args.items()])
+        logger.debug('args cmd %s', args_cmd)
+        cmd = 'gerapy parse {args_cmd} {project_path} {spider_name}'.format(
+            args_cmd=args_cmd,
+            project_path=project_path,
+            spider_name=spider_name
+        )
+        logger.debug('parse cmd %s', cmd)
+        p = Popen(cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, close_fds=True)
+        stdout, stderr = bytes2str(p.stdout.read()), bytes2str(p.stderr.read())
+        logger.debug('stdout %s, stderr %s', stdout, stderr)
+        if not stderr:
+            return JsonResponse({'status': True, 'result': json.loads(stdout)})
+        else:
+            return JsonResponse({'status': False, 'message': stderr})
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def project_file_read(request):
     """
     get content of project file
@@ -466,11 +553,13 @@ def project_file_read(request):
     if request.method == 'POST':
         data = json.loads(request.body)
         path = join(data['path'], data['label'])
-        # 二进制打开文件
+        # binary file
         with open(path, 'rb') as f:
             return HttpResponse(f.read().decode('utf-8'))
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def project_file_update(request):
     """
     update project file
@@ -481,11 +570,13 @@ def project_file_update(request):
         data = json.loads(request.body)
         path = join(data['path'], data['label'])
         code = data['code']
-        with open(path, 'w') as f:
+        with open(path, 'w', encoding='utf-8') as f:
             f.write(code)
             return JsonResponse({'result': '1'})
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def project_file_create(request):
     """
     create project file
@@ -495,10 +586,12 @@ def project_file_create(request):
     if request.method == 'POST':
         data = json.loads(request.body)
         path = join(data['path'], data['name'])
-        open(path, 'w').close()
+        open(path, 'w', encoding='utf-8').close()
         return JsonResponse({'result': '1'})
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def project_file_delete(request):
     """
     delete project file
@@ -512,6 +605,8 @@ def project_file_delete(request):
         return JsonResponse({'result': result})
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def project_file_rename(request):
     """
     rename file name
@@ -526,6 +621,8 @@ def project_file_rename(request):
         return JsonResponse({'result': '1'})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def job_list(request, client_id, project_name):
     """
     get job list of project from one client
@@ -550,6 +647,8 @@ def job_list(request, client_id, project_name):
             return JsonResponse({'message': 'Connect Error'}, status=500)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def job_log(request, client_id, project_name, spider_name, job_id):
     """
     get log of jog
@@ -581,6 +680,8 @@ def job_log(request, client_id, project_name, spider_name, job_id):
             return JsonResponse({'message': 'Load Log Error'}, status=500)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def job_cancel(request, client_id, project_name, job_id):
     """
     cancel a job
@@ -600,6 +701,34 @@ def job_cancel(request, client_id, project_name, job_id):
             return JsonResponse({'message': 'Connect Error'})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def del_version(request, client_id, project, version):
+    if request.method == 'GET':
+        client = Client.objects.get(id=client_id)
+        try:
+            scrapyd = get_scrapyd(client)
+            result = scrapyd.delete_version(project=project, version=version)
+            return JsonResponse(result)
+        except ConnectionError:
+            return JsonResponse({'message': 'Connect Error'})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def del_project(request, client_id, project):
+    if request.method == 'GET':
+        client = Client.objects.get(id=client_id)
+        try:
+            scrapyd = get_scrapyd(client)
+            result = scrapyd.delete_project(project=project)
+            return JsonResponse(result)
+        except ConnectionError:
+            return JsonResponse({'message': 'Connect Error'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def monitor_db_list(request):
     """
     get monitor db list
@@ -612,10 +741,12 @@ def monitor_db_list(request):
         type = data['type']
         if type == 'MongoDB':
             client = pymongo.MongoClient(url)
-            dbs = client.database_names()
+            dbs = client.list_database_names()
             return JsonResponse(dbs)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def monitor_collection_list(request):
     """
     get monitor collection list
@@ -634,6 +765,8 @@ def monitor_collection_list(request):
             return JsonResponse(collections)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def monitor_create(request):
     """
     create a monitor
@@ -643,11 +776,13 @@ def monitor_create(request):
     if request.method == 'POST':
         data = json.loads(request.body)
         data = data['form']
-        data['configuration'] = json.dumps(data['configuration'])
+        data['configuration'] = json.dumps(data['configuration'], ensure_ascii=False)
         monitor = Monitor.objects.create(**data)
         return JsonResponse(model_to_dict(monitor))
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def task_create(request):
     """
     add task
@@ -656,15 +791,18 @@ def task_create(request):
     """
     if request.method == 'POST':
         data = json.loads(request.body)
-        task = Task.objects.create(clients=json.dumps(data.get('clients')),
+        task = Task.objects.create(clients=json.dumps(data.get('clients'), ensure_ascii=False),
                                    project=data.get('project'),
                                    name=data.get('name'),
                                    spider=data.get('spider'),
                                    trigger=data.get('trigger'),
-                                   configuration=json.dumps(data.get('configuration')))
+                                   configuration=json.dumps(data.get('configuration'), ensure_ascii=False),
+                                   modified=1)
         return JsonResponse({'result': '1', 'data': model_to_dict(task)})
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def task_update(request, task_id):
     """
     update task info
@@ -675,14 +813,15 @@ def task_update(request, task_id):
     if request.method == 'POST':
         task = Task.objects.filter(id=task_id)
         data = json.loads(request.body)
-        print(data)
-        data['clients'] = json.dumps(data.get('clients'))
-        data['configuration'] = json.dumps(data.get('configuration'))
-        print(data)
+        data['clients'] = json.dumps(data.get('clients'), ensure_ascii=False)
+        data['configuration'] = json.dumps(data.get('configuration'), ensure_ascii=False)
+        data['modified'] = 1
         task.update(**data)
         return JsonResponse(model_to_dict(Task.objects.get(id=task_id)))
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def task_remove(request, task_id):
     """
     remove task by task_id
@@ -691,12 +830,21 @@ def task_remove(request, task_id):
     """
     if request.method == 'POST':
         try:
+            # delete job from DjangoJob
+            task = Task.objects.get(id=task_id)
+            clients = clients_of_task(task)
+            for client in clients:
+                job_id = get_job_id(client, task)
+                DjangoJob.objects.filter(name=job_id).delete()
+            # delete task
             Task.objects.filter(id=task_id).delete()
             return JsonResponse({'result': '1'})
         except:
             return JsonResponse({'result': '0'})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def task_info(request, task_id):
     """
     get task info
@@ -707,12 +855,13 @@ def task_info(request, task_id):
     if request.method == 'GET':
         task = Task.objects.get(id=task_id)
         data = model_to_dict(task)
-        print(data)
         data['clients'] = json.loads(data.get('clients'))
         data['configuration'] = json.loads(data.get('configuration'))
         return JsonResponse({'data': data})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def task_index(request):
     """
     get all tasks
@@ -722,3 +871,54 @@ def task_index(request):
     if request.method == 'GET':
         tasks = Task.objects.values()
         return JsonResponse({'result': '1', 'data': tasks})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def task_status(request, task_id):
+    """
+    get task status info
+    :param request: request object
+    :param task_id: task id
+    :return:
+    """
+    if request.method == 'GET':
+        result = []
+        task = Task.objects.get(id=task_id)
+        clients = clients_of_task(task)
+        for client in clients:
+            job_id = get_job_id(client, task)
+            jobs = DjangoJob.objects.filter(name=job_id)
+            logger.debug('jobs from djangojob %s', jobs)
+            # if job does not exist, for date mode exceed time
+            if not jobs: continue
+            job = DjangoJob.objects.get(name=job_id)
+            executions = serialize('json', DjangoJobExecution.objects.filter(job=job))
+            result.append({
+                'client': model_to_dict(client),
+                'next': job.next_run_time,
+                'executions': json.loads(executions)
+            })
+        return JsonResponse({'data': result})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def render_html(request):
+    """
+    render html with url
+    :param request:
+    :return:
+    """
+    if request.method == 'GET':
+        url = request.GET.get('url')
+        url = unquote(base64.b64decode(url).decode('utf-8'))
+        js = request.GET.get('js', 0)
+        script = request.GET.get('script')
+        try:
+            response = requests.get(url, timeout=5)
+            response.encoding = response.apparent_encoding
+            html = process_html(response.text)
+            return HttpResponse(html)
+        except Exception as e:
+            return JsonResponse({'message': e.args}, status=500)

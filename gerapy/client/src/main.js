@@ -1,30 +1,43 @@
-import 'normalize.css'
-import 'font-awesome/scss/font-awesome.scss'
-import 'element-ui/lib/theme-default/index.css'
 import Vue from 'vue'
-import '../theme/index.css'
-import ElementUI from 'element-ui'
+import App from './App.vue'
 import router from './router'
-import store from 'store'
-import api from './api'
-import lang from './lang'
-import App from './App'
-import VueCodeMirror from 'vue-codemirror'
+import ElementUI from 'element-ui'
+import ECharts from 'vue-echarts'
+import 'font-awesome/scss/font-awesome.scss'
+import './assets/scss/element.scss'
+import './assets/scss/main.scss'
+import store from './store'
+import {mapGetters} from 'vuex'
+import VueAxios from 'vue-axios'
+import VueClipboard from 'vue-clipboard2'
+import http from './http'
 
 Vue.use(ElementUI)
+Vue.use(VueClipboard)
 
-Vue.use(api)
-
-Vue.use(lang)
-
-Vue.use(VueCodeMirror)
+Vue.component('v-chart', ECharts)
 
 Vue.config.productionTip = false
 
-Vue.config.devtools = process.env.NODE_ENV === 'development'
+Vue.use(VueAxios, http)
+
+Vue.mixin({
+  computed: {
+    // register global language configuration
+    ...mapGetters(['$lang'])
+  },
+  methods: {
+    // register global methods
+    formatString: require('string-format-obj'),
+    basename: require('path').basename,
+    join: require('path').join
+  }
+})
+
 
 new Vue({
   router,
   store,
-  ...App
-}).$mount('mainbody')
+  render:
+    h => h(App),
+}).$mount('#app')

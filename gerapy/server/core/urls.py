@@ -1,8 +1,10 @@
 from django.conf.urls import url
+from rest_framework.authtoken import views as auth
 from . import views
 
 urlpatterns = [
     url(r'^$', views.index, name='index'),
+    url(r'^api/user/auth', auth.obtain_auth_token),
     url(r'^api/index/status/$', views.index_status, name='index_status'),
     url(r'^api/client/$', views.client_index, name='client_index'),
     url(r'^api/client/create', views.client_create, name='client_create'),
@@ -20,11 +22,13 @@ urlpatterns = [
     url(r'^api/client/(\d+)/project/(\S+)/job/(\S+)/cancel', views.job_cancel, name='job_cancel'),
     url(r'^api/project/index', views.project_index, name='project_index'),
     url(r'^api/project/create', views.project_create, name='project_create'),
+    url(r'^api/project/upload', views.project_upload, name='project_upload'),
+    url(r'^api/project/clone', views.project_clone, name='project_clone'),
     url(r'^api/project/(\S+)/configure', views.project_configure, name='project_configure'),
     url(r'^api/project/(\S+)/build', views.project_build, name='project_build'),
-    url(r'^api/project/(\S+)/generate', views.project_generate, name='project_generate'),
     url(r'^api/project/(\S+)/tree', views.project_tree, name='project_tree'),
     url(r'^api/project/(\S+)/remove', views.project_remove, name='project_remove'),
+    url(r'^api/project/(\S+)/parse', views.project_parse, name='project_parse'),
     url(r'^api/project/file/rename', views.project_file_rename, name='project_file_rename'),
     url(r'^api/project/file/delete', views.project_file_delete, name='project_file_delete'),
     url(r'^api/project/file/create', views.project_file_create, name='project_file_create'),
@@ -38,4 +42,6 @@ urlpatterns = [
     url(r'^api/task/(\d+)/update', views.task_update, name='task_update'),
     url(r'^api/task/(\d+)/info', views.task_info, name='task_info'),
     url(r'^api/task/(\d+)/remove', views.task_remove, name='task_remove'),
+    url(r'^api/task/(\d+)/status', views.task_status, name='task_status'),
+    url(r'^api/render', views.render_html, name='render_html'),
 ]
