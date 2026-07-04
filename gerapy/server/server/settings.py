@@ -22,7 +22,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SECRET_KEY = 'n8e-!s(t4$n!l_j$o!9ey7es@25+=o-()38viz$pb(!djhxe2_'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('APP_DEBUG', True)
 
 ALLOWED_HOSTS = ['*']
 
@@ -35,6 +35,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
+    'rest_framework.authtoken',
     'gerapy.server.core',
     'django_apscheduler',
     'corsheaders'
@@ -45,11 +47,17 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'gerapy.server.core.middlewares.TransformMiddleware',
+    # 'gerapy.server.core.middlewares.TransformMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # 'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
+    ],
+}
 
 ROOT_URLCONF = 'gerapy.server.server.urls'
 
@@ -74,12 +82,25 @@ WSGI_APPLICATION = 'gerapy.server.server.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/1.11/ref/settings/#databases
 
-DB_PATH = os.path.join(os.getcwd(), 'db.sqlite3')
+DB_SUBDIR = 'dbs'
+DB_DIR = os.path.join(os.getcwd(), DB_SUBDIR)
+
+# Create DB dir if it does not exist
+os.path.exists(DB_DIR) or os.makedirs(DB_DIR)
+
+DB_PATH = os.path.join(DB_DIR, 'db.sqlite3')
 
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': DB_PATH,
+        # SQLite locks the whole database on write. The background scheduler and
+        # the web server write concurrently, so the default 5s busy timeout is
+        # easily exceeded and raises "database is locked". A longer timeout makes
+        # writers wait for the lock instead of failing. Tune via SQLITE_TIMEOUT.
+        'OPTIONS': {
+            'timeout': int(os.getenv('SQLITE_TIMEOUT', 20)),
+        },
     }
 }
 
@@ -123,6 +144,7 @@ CORS_ORIGIN_ALLOW_ALL = True
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/1.10/howto/static-files/
+X_FRAME_OPTIONS = 'SAMEORIGIN'
 
 STATICFILES_DIRS = (
     os.path.join(BASE_DIR, 'core/templates/static'),
